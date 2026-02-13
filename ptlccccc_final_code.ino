@@ -1,0 +1,395 @@
+//processing
+int inpwp[5][8];
+
+//Preecision Servos-------------------------------------------------------------
+#include <SCServo.h>
+SMS_STS st;
+// Declare UART2 properly
+HardwareSerial ServoSerial(2);
+#define SERVO_TX 17   // ESP32 TX → Adapter RX
+#define SERVO_RX 16   // ESP32 RX → Adapter TX
+//Camera----------------------------------------------
+int rpi=18;
+//Dipping servo----------------------------------------------------------------
+#include <ESP32Servo.h>
+Servo myservo;
+static const int servoPin = 15;
+int pos = 0;
+//Linear actuators-------------------------------------------------------------
+float y_Position=0.0;
+float x_Position=0.0;
+const int xenablePin = 27;
+// Define pin connections & motor's steps per revolution
+const int xdirPin = 26;
+const int xstepPin = 14;
+const int stepsPerRevolution = 200;
+const int yenablePin = 19;
+const int ydirPin = 25;
+const int ystepPin = 32;
+int timedipping=10000; //can be changed according to how long its dipped
+int timefan=10000; //can be changed according to how long fan needs to be switched on
+
+//temp sensor------------------------------------------------------------------
+//SCL - GPIO 22
+//SDA - GPIO 21
+#include <Adafruit_MLX90614.h>
+Adafruit_MLX90614 mlx = Adafruit_MLX90614();
+
+//Relay Hat---------------------------------------------------------------------
+const int Heating_Pad=4;
+const int Fan=2;
+
+//Parallel Processing-------------------------------------------------------------
+TaskHandle_t Task1;
+TaskHandle_t Task2;
+
+void setup() {
+  
+  //General-------------------------------------------------------------------------------------------------
+  Serial.begin(9600);
+
+  //Precision servo-----------------------------------------------------------------------------------------
+  // Start UART2
+  ServoSerial.begin(1000000, SERIAL_8N1, SERVO_RX, SERVO_TX);
+  // Tell library which serial to use
+  st.pSerial = &ServoSerial;
+  delay(1000);
+  int id = st.Ping(1);
+  if (id != -1) {
+    Serial.println("ST3020 detected!");
+  } else {
+    Serial.println("Servo NOT found!");
+  }
+  st.WritePosEx(1, 2048, 1000);
+  st.WritePosEx(2, 2048, 1000);
+
+  //Linear actuators----------------------------------------------------------------------------------------
+  // Declare pins as Outputs
+  pinMode(xenablePin, OUTPUT);
+  pinMode(yenablePin, OUTPUT);
+  digitalWrite(xenablePin, LOW);
+  digitalWrite(yenablePin, LOW);
+  pinMode(xstepPin, OUTPUT);
+  pinMode(xdirPin, OUTPUT);
+  pinMode(35,INPUT);
+  // Set motor direction clockwise
+  digitalWrite(xenablePin, LOW);//enable actuastor
+  digitalWrite(xdirPin, LOW);
+  //Spin till end is reached 
+  
+//y actuator
+  pinMode(ystepPin, OUTPUT);
+  pinMode(ydirPin, OUTPUT);
+  pinMode(34,INPUT);
+  // Set motor direction clockwise
+  digitalWrite(yenablePin, LOW);
+  digitalWrite(ydirPin, HIGH);
+  //rotate till end is reached
+  while(digitalRead(34)==LOW)
+  {
+    delayMicroseconds(2000);
+    digitalWrite(ystepPin, HIGH);
+    digitalWrite(ystepPin, LOW);
+    delayMicroseconds(2000);
+  }
+  delay(1000);
+  digitalWrite(ydirPin, LOW);
+  // move 4 rotation away as home
+  for(int y=0;y<4*stepsPerRevolution;y++)
+  {
+    delayMicroseconds(2000);
+    digitalWrite(ystepPin, HIGH);
+    digitalWrite(ystepPin, LOW);
+    delayMicroseconds(2000);
+  }
+  y_Position=0.0;
+
+  //x actuator
+  while(digitalRead(35)==LOW)
+  {
+    delayMicroseconds(2000);
+    digitalWrite(xstepPin, HIGH);
+    digitalWrite(xstepPin, LOW);
+    delayMicroseconds(2000);
+  }
+  delay(1000);
+  digitalWrite(xdirPin, HIGH);
+  //move 8 rotation away as home
+  for(int x=0;x<(9.5*stepsPerRevolution);x++)
+  {
+    delayMicroseconds(2000);
+    digitalWrite(xstepPin, HIGH);
+    digitalWrite(xstepPin, LOW);
+    delayMicroseconds(2000);
+  }
+  x_Position=0.0;//Setting to home
+
+  //Dipping servo-------------------------------------------------------------------------------------------
+  ESP32PWM::allocateTimer(0);
+  ESP32PWM::allocateTimer(1);
+  ESP32PWM::allocateTimer(2);
+  ESP32PWM::allocateTimer(3);
+  myservo.setPeriodHertz(50);    // standard 50 hz servo
+  myservo.attach(servoPin, 500, 2400);
+  myservo.write(pos);    // tell servo to go to position in variable 'pos'
+  delay(15); 
+
+  //Relay Hat-----------------------------------------------------------------------------------------------
+  pinMode(Heating_Pad, OUTPUT);
+  pinMode(Fan, OUTPUT);
+  digitalWrite(Heating_Pad, HIGH);  // OFF
+digitalWrite(Fan, HIGH); 
+
+  //temp sensor---------------------------------------------------------------------------------------------
+  Serial.println("Adafruit MLX90614 test");
+  if (!mlx.begin()) {
+    Serial.println("Error connecting to MLX sensor. Check wiring.");
+    while (1);
+  };  
+
+ 
+//Parallel Processing---------------------------------------------------------------------------------------
+  //create a task that will be executed in the Task1code() function, with priority 1 and executed on core 0
+  xTaskCreatePinnedToCore(
+                    Task1code,   /* Task function. */
+                    "Task1",     /* name of task. */
+                    10000,       /* Stack size of task */
+                    NULL,        /* parameter of the task */
+                    1,           /* priority of the task */
+                    &Task1,      /* Task handle to keep track of created task */
+                    0);          /* pin task to core 0 */                  
+  delay(500); 
+
+  //create a task that will be executed in the Task2code() function, with priority 1 and executed on core 1
+  xTaskCreatePinnedToCore(
+                    Task2code,   /* Task function. */
+                    "Task2",     /* name of task. */
+                    10000,       /* Stack size of task */
+                    NULL,        /* parameter of the task */
+                    1,           /* priority of the task */
+                    &Task2,      /* Task handle to keep track of created task */
+                    1);          /* pin task to core 1 */
+    delay(500); 
+}
+
+
+//Task1code: all the components except heating pad
+void Task1code( void * pvParameters ){
+  Serial.print("Task1 running on core ");
+  Serial.println(xPortGetCoreID());
+
+  for(;;){
+    int retr=100;
+    while(retr!=0)
+    {
+    retr=whichwell(inpwp);
+    vTaskDelay(1000 / portTICK_PERIOD_MS);
+    int r=retr/10;
+    int c=retr%10;
+    spotandrinse(r,c);
+    vTaskDelay(1000 / portTICK_PERIOD_MS);
+    }
+    dippingdrying();
+    vTaskDelay(10000 / portTICK_PERIOD_MS);
+    
+  }
+    vTaskDelay(1000 / portTICK_PERIOD_MS);
+}
+
+//Task2code: Takes care of the heating pad
+void Task2code( void * pvParameters ){
+  Serial.print("Task2 running on core ");
+  Serial.println(xPortGetCoreID());
+
+  for (;;) {
+    int temp_a = mlx.readAmbientTempC();
+    int temp_o = mlx.readObjectTempC();
+    Serial.print("Ambient = ");
+    Serial.print(temp_a);
+    Serial.print(" °C\tObject = ");
+    Serial.print(temp_o);
+    Serial.println(" °C");
+    if (temp_o <= 80) {
+      digitalWrite(Heating_Pad, LOW);
+    } else {
+      digitalWrite(Heating_Pad, HIGH);
+    }
+    vTaskDelay(1000 / portTICK_PERIOD_MS);
+  }
+}
+void loop()
+{
+}
+
+//this takes input of microwell plate as row and column and spots that microwell
+void spotandrinse(int r, int c)
+{
+    int xvalue[5][8] = {
+        {1,2,3,4,5,6,7,8},
+        {9,10,11,12,13,14,15,16},
+        {17,18,19,20,21,22,23,24},
+        {25,26,27,28,29,30,31,32},
+        {33,34,35,36,37,38,39,40}
+    };
+
+    int yvalue[5][8] = {
+        {0,1,0,1,0,1,0,1},
+        {1,0,1,0,1,0,1,0},
+        {0,1,0,1,0,1,0,1},
+        {1,0,1,0,1,0,1,0},
+        {0,1,0,1,0,1,0,1}
+    };
+
+    int xval = xvalue[r][c];
+    int yval = yvalue[r][c];
+    
+    //Home position
+    st.WritePosEx(1, 2248, 1000);
+    vTaskDelay(1000 / portTICK_PERIOD_MS);
+    
+    //Servo moves above microwell plate
+    st.WritePosEx(1, xval, 1000);
+    vTaskDelay(1000 / portTICK_PERIOD_MS);
+    
+    //Microwell plate moves
+    st.WritePosEx(2, yval, 1000);
+    vTaskDelay(1000 / portTICK_PERIOD_MS);
+    
+    //Lowered by a few mm(4)or 2 rotations
+    digitalWrite(yenablePin, LOW);
+    digitalWrite(ydirPin, HIGH);
+  for(int y=0;y<4*stepsPerRevolution;y++)
+  {
+    delayMicroseconds(2000);
+    digitalWrite(ystepPin, HIGH);
+    digitalWrite(ystepPin, LOW);
+    delayMicroseconds(2000);
+  }
+  y_Position=-4.0;
+  vTaskDelay(1000 / portTICK_PERIOD_MS);
+  
+    //Comes back up
+    digitalWrite(ydirPin, LOW);
+  for(int y=0;y<4*stepsPerRevolution;y++)
+  {
+    delayMicroseconds(2000);
+    digitalWrite(ystepPin, HIGH);
+    digitalWrite(ystepPin, LOW);
+    delayMicroseconds(2000);
+  }
+  y_Position=0.0;
+  vTaskDelay(1000 / portTICK_PERIOD_MS);
+  
+    //Goes above plate(1900)
+    st.WritePosEx(1, 1900, 1000);
+    vTaskDelay(1000 / portTICK_PERIOD_MS);
+    
+    //Lowered by a few mm
+    digitalWrite(yenablePin, LOW);
+    digitalWrite(ydirPin, HIGH);
+  for(int y=0;y<3.75*stepsPerRevolution;y++)
+  {
+    delayMicroseconds(2000);
+    digitalWrite(ystepPin, HIGH);
+    digitalWrite(ystepPin, LOW);
+    delayMicroseconds(2000);
+  }
+  y_Position=-3.75;
+  vTaskDelay(1000 / portTICK_PERIOD_MS);
+  
+    //Comes back up
+    digitalWrite(ydirPin, LOW);
+  for(int y=0;y<3.75*stepsPerRevolution;y++)
+  {
+    delayMicroseconds(2000);
+    digitalWrite(ystepPin, HIGH);
+    digitalWrite(ystepPin, LOW);
+    delayMicroseconds(2000);
+  }
+  y_Position=0.0;
+  vTaskDelay(1000 / portTICK_PERIOD_MS);
+  
+    //goes to solvent wash
+    st.WritePosEx(1, 2248, 1000);
+    //goes down 
+    digitalWrite(yenablePin, LOW);
+    digitalWrite(ydirPin, HIGH);
+  for(int y=0;y<5*stepsPerRevolution;y++)
+  {
+    delayMicroseconds(2000);
+    digitalWrite(ystepPin, HIGH);
+    digitalWrite(ystepPin, LOW);
+    delayMicroseconds(2000);
+  }
+  y_Position=-5.0;
+  vTaskDelay(1000 / portTICK_PERIOD_MS);
+  
+    //shakes in very small steps
+    for(int k=0;k<10;k++)
+    {
+    st.WritePosEx(1, 2210, 1000);
+    vTaskDelay(300 / portTICK_PERIOD_MS);
+    st.WritePosEx(1, 2230, 1000);
+    vTaskDelay(300 / portTICK_PERIOD_MS);
+    }
+    vTaskDelay(1000 / portTICK_PERIOD_MS);
+    
+    // comes up
+    digitalWrite(ydirPin, LOW);
+  for(int y=0;y<5*stepsPerRevolution;y++)
+  {
+    delayMicroseconds(2000);
+    digitalWrite(ystepPin, HIGH);
+    digitalWrite(ystepPin, LOW);
+    delayMicroseconds(2000);
+  }
+  y_Position=0.0;
+}
+void dippingdrying()
+{
+  for (pos = 0; pos <= 90; pos += 1) { // goes from 0 degrees to 180 degrees
+    // in steps of 1 degree
+    myservo.write(pos);    // tell servo to go to position in variable 'pos'
+    delay(15);             // waits 15ms for the servo to reach the position
+  }
+  vTaskDelay(timedipping / portTICK_PERIOD_MS);
+  for (pos = 90; pos >= 0; pos -= 1) { // goes from 0 degrees to 90 degrees
+    // in steps of 1 degree
+    myservo.write(pos);    // tell servo to go to position in variable 'pos'
+    delay(15);             // waits 15ms for the servo to reach the position
+    digitalWrite(Fan, LOW);
+    vTaskDelay(timefan / portTICK_PERIOD_MS);
+    digitalWrite(Fan, HIGH);
+    vTaskDelay(1000 / portTICK_PERIOD_MS);
+  }
+}
+int whichwell(int posi[5][8])
+{
+  int ret=0;
+  int pos[5][8] = {
+        {0,0,0,0,0,0,0,0},
+        {0,0,0,0,0,0,0,0},
+        {0,0,0,0,0,0,0,0},
+        {0,0,0,0,0,0,0,0},
+        {0,0,0,0,0,0,0,0}
+    };
+  for (int i = 0; i < 5; i++) {
+    for (int j = 0; j < 8; j++) {
+      pos[i][j] = posi[i][j];
+    }
+  }
+    for(int j=0;j<5;j++)
+    {
+      for(int i=0;i<8;i++)
+      {
+        if(pos[j][i]==1)
+        {
+          ret=(j*10)+i;
+          inpwp[j][i]=0;
+          return(ret);
+        }
+      }
+    }
+    ret=0;
+    return(ret);
+}
